@@ -1,4 +1,4 @@
-# Server Backup
+# Crealib Server Backup (CSB)
 **Autor:** Charlie Martínez
 **Licencia:** GPLv2
 
