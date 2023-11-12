@@ -207,9 +207,9 @@ for folder in $(find "$WWW_DIR" -maxdepth 1 -type d); do
     SITIOS+=("$(basename "$folder")")
 done
 
-# Escanea y agrega automáticamente las bases de datos a su array
+# Escanea y agrega automáticamente las bases de datos a su array, omitiendo las regenerables
 
-DATABASES=($(mysql -u "$user" -p"$pass" -e "show databases" | awk '{print $1}' | grep -v "^Database$"))
+DATABASES=($(mysql -u "$user" -p"$pass" -e "show databases" | awk '{print $1}' | grep -vE "^(Database|performance_schema|information_schema)$"))
 
 # ******************************************************** MODO MANUAL *********************************************************
 
