@@ -208,9 +208,8 @@ for folder in $(find "$WWW_DIR" -maxdepth 1 -type d); do
 done
 
 # Escanea y agrega automáticamente las bases de datos a su array
-# (Omite las bbdd regenerables que no pertenecen a ninguna aplicación web)
 
-DATABASES=($(mysql -u "$user" -p"$pass" -e "show databases" | awk '{print $1}' | grep -vE "^(Database|performance_schema|mysql)$")) 
+DATABASES=($(mysql -u "$user" -p"$pass" -e "show databases" | awk '{print $1}' | grep -v "^Database$"))
 
 # ******************************************************** MODO MANUAL *********************************************************
 
