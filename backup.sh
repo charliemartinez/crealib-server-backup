@@ -208,8 +208,9 @@ for folder in $(find "$WWW_DIR" -maxdepth 1 -type d); do
 done
 
 # Escanea y agrega automáticamente las bases de datos a su array
+# (Omite las bbdd regenerables que no pertenecen a ninguna aplicación web)
 
-DATABASES=($(mysql -u "$user" -p"$pass" -e "show databases" | awk '{print $1}' | grep -v "^Database$"))
+DATABASES=($(mysql -u "$user" -p"$pass" -e "show databases" | awk '{print $1}' | grep -vE "^(Database|performance_schema|mysql)$")) 
 
 # ******************************************************** MODO MANUAL *********************************************************
 
@@ -345,7 +346,7 @@ else
 		echo "$DATE : Ejecución automática" >> "$LOG_FILE"
 		echo "=====================================================================================" >> "$LOG_FILE"
 
-	# Crea un respaldo de todos los sitios que existen:
+# Crea un respaldo de todos los sitios que existen:
 	
 	if check_sitios; then
 		backup_files=()
@@ -359,6 +360,7 @@ else
 			backup_files+=("$TAR_FILE")
 		done
 	fi
+
 	
 	# Crea un respaldo de todos los ficheros de configuración de VirtualHosts que existen
 	
@@ -374,6 +376,7 @@ else
 		done
 	fi
 
+
 	# Crea un respaldo de todas las bases de datos que existen
 
 	if check_bbdd; then
@@ -386,6 +389,7 @@ else
 			backup_files+=("$SQL_FILE")
 		done
 	fi
+
 
 	# Saludo final del modo automático y registro en el log
 	
