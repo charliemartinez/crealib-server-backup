@@ -38,22 +38,21 @@ YEAR=$(date +'%Y')
 
 # ******************************************************** COMPROBACIONES *********************************************************
 
+# Verifica y crea archivo de LOG si no existe
+
+if [ ! -f "$LOG_FILE" ]; then
+ #   touch "$LOG_FILE"
+    echo "CREALIB SERVER BACKUP (CSB)" >> "$LOG_FILE"
+    echo "Registro de Backups realizados" >> "$LOG_FILE"
+    echo " " >> "$LOG_FILE"
+    echo "$DATE : Creación del archivo de registro." >> "$LOG_FILE"
+fi
+
 # Verifica y el directorio de almacenamiento si no existen
 
 if [ ! -d "$BACKUP_DIR" ]; then
     mkdir -p "$BACKUP_DIR"
     echo "$DATE : Directorio $BACKUP_DIR creado." >> "$LOG_FILE"
-fi
-
-# Verifica y crea archivo de LOG si no existe
-
-if [ ! -f "$LOG_FILE" ]; then
-    touch "$LOG_FILE"
-    echo "CREALIB SERVER BACKUP (CSB)" >> "$LOG_FILE"
-    echo "Registro de Backups realizados" >> "$LOG_FILE"
-    echo " " >> "$LOG_FILE"
-    echo "$DATE : Creación del directorio de almacenamiento." >> "$LOG_FILE"
-    echo "$DATE : Creación del archivo de registro." >> "$LOG_FILE"
 fi
 
 # Verifica la existencia de los comandos tar, gzip, MySQL/MariaDB, mkdir, dialog y cp
