@@ -191,6 +191,10 @@ function check_bbdd() {
     return 0
 }
 
+# Variable de control para determinar si se ha realizado algún respaldo
+
+BACKUP_DONE=false
+
 # ******************************************************** ESCANEO *********************************************************
 
 # Escanea y agrega automáticamente los archivos .conf a su array
@@ -211,30 +215,32 @@ done
 
 DATABASES=($(mysql -u "$user" -p"$pass" -e "show databases" | awk '{print $1}' | grep -vE "^(Database|performance_schema|information_schema)$"))
 
-# ******************************************************** MODO MANUAL *********************************************************
+# ******************************************************* MODO MANUAL *******************************************************
 
 if [[ "$1" == "--manual" || "$1" == "-m" ]]; then # Modo manual: "backup --manual" ó "backup -m"
 
     # Comprobar si existen sitios
     
-    if check_sitios "manual"; then
-    
-        # Genera las opciones de menú para la selección de sitios
-        
-        folder_options=()
-        for ((i = 0; i < ${#SITIOS[@]}; i++)); do
-            folder="${SITIOS[$i]}"
-            folder_name=$(basename "$folder") # Obtener el nombre base
-            folder_options+=("$i" "$folder_name" off)
-        done
+	if check_sitios "manual"; then
 
-        selected_folders=$(dialog --title "[Desplazarse: <🡡> <🡣>][Seleccionar: <Space>]" --backtitle "CREALIB SERVER BACKUP (CSB) 2023 By Charlie Martínez" \
-            --stdout \
-            --checklist "Sitios a respaldar:" 15 50 5 "${folder_options[@]}")
+		# Genera las opciones de menú para la selección de sitios
 
-        # Cierra el descriptor de archivo para dialog
-        exec 3>&1
-    fi
+		folder_options=()
+		mapfile -t SITIOS < <(find "$WWW_DIR" -maxdepth 1 -mindepth 1 -type d -exec basename {} \;)
+		index=0
+		for folder_name in "${SITIOS[@]}"; do
+			folder_options+=("$index" "$folder_name" off)
+			((index++))
+		done
+
+		selected_folders=$(dialog --title "[Desplazarse: <🡡> <🡣>][Seleccionar: <Space>]" 
+			--backtitle "CREALIB SERVER BACKUP (CSB) 2023 By Charlie Martínez" \
+			--stdout \
+			--checklist "Sitios a respaldar:" 15 50 5 "${folder_options[@]}")
+
+		# Cierra el descriptor de archivo para dialog
+		exec 3>&1
+	fi
 
     # Comprobar si existen bases de datos
     
@@ -247,7 +253,8 @@ if [[ "$1" == "--manual" || "$1" == "-m" ]]; then # Modo manual: "backup --manua
             database_options+=("$i" "${DATABASES[$i]}" off)
         done
 
-        selected_databases=$(dialog --title "[Desplazarse: <🡡> <🡣>][Seleccionar: <Space>]" --backtitle "CREALIB SERVER BACKUP (CSB) 2023 By Charlie Martínez" \
+        selected_databases=$(dialog --title "[Desplazarse: <🡡> <🡣>][Seleccionar: <Space>]" 
+			--backtitle "CREALIB SERVER BACKUP (CSB) 2023 By Charlie Martínez" \
             --stdout \
             --checklist "Bases de datos a respaldar:" 15 50 5 "${database_options[@]}")
 
@@ -268,7 +275,8 @@ if [[ "$1" == "--manual" || "$1" == "-m" ]]; then # Modo manual: "backup --manua
             conf_options+=("$i" "$conf_file" off)
         done
 
-        selected_conf_files=$(dialog --title "[Desplazarse: <🡡> <🡣>][Seleccionar: <Space>]" --backtitle "CREALIB SERVER BACKUP (CSB) 2023 By Charlie Martínez" \
+        selected_conf_files=$(dialog --title "[Desplazarse: <🡡> <🡣>][Seleccionar: <Space>]" 
+			--backtitle "CREALIB SERVER BACKUP (CSB) 2023 By Charlie Martínez" \
             --stdout \
             --checklist "Configuraciones de VirtualHosts a respaldar:" 15 50 5 "${conf_options[@]}")
     fi
@@ -287,6 +295,10 @@ if [[ "$1" == "--manual" || "$1" == "-m" ]]; then # Modo manual: "backup --manua
 			tar -czvf "$BACKUP_DIR/$YEAR/$MONTH/$TAR_FILE" -C "$WWW_DIR" "$folder_name"
 			backup_files+=("$TAR_FILE")
 		done
+		
+		if [ ${#backup_files[@]} -gt 0 ]; then
+			BACKUP_DONE=true
+		fi
 
 	# Crea un respaldo de las bases de datos seleccionadas en archivos SQL individuales
 				
@@ -299,6 +311,10 @@ if [[ "$1" == "--manual" || "$1" == "-m" ]]; then # Modo manual: "backup --manua
 			mysqldump -u "$user" -p"$pass" "$database" > "$BACKUP_DIR/$YEAR/$MONTH/$SQL_FILE"
 			backup_files+=("$SQL_FILE")
 		done
+		
+		if [ ${#backup_files[@]} -gt 0 ]; then
+			BACKUP_DONE=true
+		fi
 
     # Crea un respaldo de los archivos .conf de VirtualHosts seleccionados en archivos individuales
     
@@ -312,9 +328,14 @@ if [[ "$1" == "--manual" || "$1" == "-m" ]]; then # Modo manual: "backup --manua
 			cp "$VIRTUALHOSTS_DIR/$conf_file" "$BACKUP_DIR/$YEAR/$MONTH/$NEW_CONF_FILE"
 			backup_files+=("$NEW_CONF_FILE")
 		done
+		
+		if [ ${#backup_files[@]} -gt 0 ]; then
+			BACKUP_DONE=true
+		fi
 
-    # Registrar los archivos respaldados en el archivo de log
-    
+	# Registrar los archivos respaldados en el archivo de log
+	
+	if [ "$BACKUP_DONE" = true ]; then
 		echo " " >> "$LOG_FILE"
 		echo "=====================================================================================" >> "$LOG_FILE"
 		echo "$DATE : Ejecución manual" >> "$LOG_FILE"
@@ -324,6 +345,8 @@ if [[ "$1" == "--manual" || "$1" == "-m" ]]; then # Modo manual: "backup --manua
 		for file in "${backup_files[@]}"; do
 			echo "$file" >> "$LOG_FILE"
 		done
+	fi
+
 
     # Saludo final del modo manual
     
