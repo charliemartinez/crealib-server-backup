@@ -38,21 +38,22 @@ YEAR=$(date +'%Y')
 
 # ******************************************************** COMPROBACIONES *********************************************************
 
-# Verifica y crea archivo de LOG si no existe
-
-if [ ! -f "$LOG_FILE" ]; then
- #   touch "$LOG_FILE"
-    echo "CREALIB SERVER BACKUP (CSB)" >> "$LOG_FILE"
-    echo "Registro de Backups realizados" >> "$LOG_FILE"
-    echo " " >> "$LOG_FILE"
-    echo "$DATE : Creación del archivo de registro." >> "$LOG_FILE"
-fi
-
 # Verifica y el directorio de almacenamiento si no existen
 
 if [ ! -d "$BACKUP_DIR" ]; then
     mkdir -p "$BACKUP_DIR"
     echo "$DATE : Directorio $BACKUP_DIR creado." >> "$LOG_FILE"
+fi
+
+# Verifica y crea archivo de LOG si no existe
+
+if [ ! -f "$LOG_FILE" ]; then
+    touch "$LOG_FILE"
+    echo "CREALIB SERVER BACKUP (CSB)" >> "$LOG_FILE"
+    echo "Registro de Backups realizados" >> "$LOG_FILE"
+    echo " " >> "$LOG_FILE"
+    echo "$DATE : Creación del directorio de almacenamiento." >> "$LOG_FILE"
+    echo "$DATE : Creación del archivo de registro." >> "$LOG_FILE"
 fi
 
 # Verifica la existencia de los comandos tar, gzip, MySQL/MariaDB, mkdir, dialog y cp
@@ -72,43 +73,6 @@ if [ ${#missing_dependencies[@]} -gt 0 ]; then
         install_dependency "$dep"
     done
 fi
-
-# Instalación de dependencias
-
-install_dependency() {
-    dep="$1"
-    case "$dep" in
-        "tar")
-            echo "Instalando tar..."
-            apt-get install -y tar
-            echo "$DATE : Instalación de tar, dependencia necesaria." >> "$LOG_FILE"
-            ;;
-        "gzip")
-            echo "Instalando gzip..."
-            apt-get install -y gzip
-            echo "$DATE : Instalación de gzip, dependencia necesaria." >> "$LOG_FILE"
-            ;;
-        "mkdir")
-            echo "Instalando mkdir..."
-            apt-get install -y coreutils
-            echo "$DATE : Instalación de coreutils, dependencia necesaria." >> "$LOG_FILE"
-            ;;
-        "cp")
-            echo "Instalando cp..."
-            apt-get install -y coreutils
-            echo "$DATE : Instalación de coreutils, dependencia necesaria." >> "$LOG_FILE"
-            ;;
-		"dialog")
-           echo "Instalando dialog..."
-           apt-get install -y coreutils
-           echo "$DATE : Instalación de dialog, dependencia necesaria." >> "$LOG_FILE"
-           ;;
-            
-        *)
-            echo "Advertencia: No se pudo instalar la dependencia desconocida: $dep"
-            ;;
-    esac
-}
 
 # Verifica si está instalado MySQL o MariaDB
 
@@ -190,10 +154,6 @@ function check_bbdd() {
     return 0
 }
 
-# Variable de control para determinar si se ha realizado algún respaldo
-
-BACKUP_DONE=false
-
 # ******************************************************** ESCANEO *********************************************************
 
 # Escanea y agrega automáticamente los archivos .conf a su array
@@ -214,9 +174,9 @@ done
 
 DATABASES=($(mysql -u "$user" -p"$pass" -e "show databases" | awk '{print $1}' | grep -vE "^(Database|performance_schema|information_schema)$"))
 
-# ******************************************************* MODO MANUAL *******************************************************
+# ******************************************************** MODO MANUAL *********************************************************
 
-if [[ "$1" == "--manual" || "$1" == "-m" ]]; then # Modo manual: "backup --manual" ó "backup -m"
+if [[ "$1" == "--manual" || "$1" == "-m" || "$1" == "--m" || "$1" == "-manual" ]]; then # Modo manual: "backup --manual" ó "backup -m"
 
     # Comprobar si existen sitios
     
@@ -232,15 +192,13 @@ if [[ "$1" == "--manual" || "$1" == "-m" ]]; then # Modo manual: "backup --manua
 			((index++))
 		done
 
-		selected_folders=$(dialog --title "[Desplazarse: <🡡> <🡣>][Seleccionar: <Space>]" 
-			--backtitle "CREALIB SERVER BACKUP (CSB) 2023 By Charlie Martínez" \
+		selected_folders=$(dialog --title "[Desplazarse: <🡡> <🡣>][Seleccionar: <Space>]" --backtitle "CREALIB SERVER BACKUP (CSB) 2023 By Charlie Martínez" \
 			--stdout \
 			--checklist "Sitios a respaldar:" 15 50 5 "${folder_options[@]}")
 
 		# Cierra el descriptor de archivo para dialog
 		exec 3>&1
 	fi
-
     # Comprobar si existen bases de datos
     
     if check_bbdd "manual"; then
@@ -252,8 +210,7 @@ if [[ "$1" == "--manual" || "$1" == "-m" ]]; then # Modo manual: "backup --manua
             database_options+=("$i" "${DATABASES[$i]}" off)
         done
 
-        selected_databases=$(dialog --title "[Desplazarse: <🡡> <🡣>][Seleccionar: <Space>]" 
-			--backtitle "CREALIB SERVER BACKUP (CSB) 2023 By Charlie Martínez" \
+        selected_databases=$(dialog --title "[Desplazarse: <🡡> <🡣>][Seleccionar: <Space>]" --backtitle "CREALIB SERVER BACKUP (CSB) 2023 By Charlie Martínez" \
             --stdout \
             --checklist "Bases de datos a respaldar:" 15 50 5 "${database_options[@]}")
 
@@ -274,78 +231,99 @@ if [[ "$1" == "--manual" || "$1" == "-m" ]]; then # Modo manual: "backup --manua
             conf_options+=("$i" "$conf_file" off)
         done
 
-        selected_conf_files=$(dialog --title "[Desplazarse: <🡡> <🡣>][Seleccionar: <Space>]" 
-			--backtitle "CREALIB SERVER BACKUP (CSB) 2023 By Charlie Martínez" \
+        selected_conf_files=$(dialog --title "[Desplazarse: <🡡> <🡣>][Seleccionar: <Space>]" --backtitle "CREALIB SERVER BACKUP (CSB) 2023 By Charlie Martínez" \
             --stdout \
             --checklist "Configuraciones de VirtualHosts a respaldar:" 15 50 5 "${conf_options[@]}")
     fi
 
-    # Crea un respaldo de las carpetas seleccionadas en archivos tar.gz individuales
-        
-		backup_files=()
-    
-		for index in $selected_folders; do
-			folder="${SITIOS[index]}"
-			folder_name=$(basename "$folder")
-			TAR_FILE="${DATE}_${folder_name}.tar.gz"
+	# Crea un respaldo de los sitios seleccionados en archivos tar.gz individuales
+	backup_files=()
+	for index in $selected_folders; do
+		folder="${SITIOS[index]}"
+		folder_name=$(basename "$folder")
+		TAR_FILE="${DATE}_${folder_name}.tar.gz"
 
-			# Utiliza las variables $YEAR y $MONTH para determinar la ubicación de almacenamiento
-			
-			tar -czvf "$BACKUP_DIR/$YEAR/$MONTH/$TAR_FILE" -C "$WWW_DIR" "$folder_name"
-			backup_files+=("$TAR_FILE")
-		done
-		
-		if [ ${#backup_files[@]} -gt 0 ]; then
-			BACKUP_DONE=true
-		fi
+		# Utiliza las variables $YEAR y $MONTH para determinar la ubicación de almacenamiento
+		tar -czvf "$BACKUP_DIR/$YEAR/$MONTH/$TAR_FILE" -C "$WWW_DIR" "$folder_name"
+		backup_files+=("$TAR_FILE")
+	done
 
-	# Crea un respaldo de las bases de datos seleccionadas en archivos SQL individuales
-				
-		for index in $selected_databases; do
-			database="${DATABASES[index]}"
-			SQL_FILE="${DATE}_${database}.sql"
-
-			# Utiliza las variables $YEAR y $MONTH para determinar la ubicación de almacenamiento
-			
-			mysqldump -u "$user" -p"$pass" "$database" > "$BACKUP_DIR/$YEAR/$MONTH/$SQL_FILE"
-			backup_files+=("$SQL_FILE")
-		done
-		
-		if [ ${#backup_files[@]} -gt 0 ]; then
-			BACKUP_DONE=true
-		fi
-
-    # Crea un respaldo de los archivos .conf de VirtualHosts seleccionados en archivos individuales
-    
-		for index in $selected_conf_files; do
-			conf_file="${CONF_FILES[index]}"
-			conf_filename="$(basename "$conf_file")"
-			NEW_CONF_FILE="${DATE}_${conf_filename}"
-			
-			# Utiliza las variables $YEAR y $MONTH para determinar la ubicación de almacenamiento
-			
-			cp "$VIRTUALHOSTS_DIR/$conf_file" "$BACKUP_DIR/$YEAR/$MONTH/$NEW_CONF_FILE"
-			backup_files+=("$NEW_CONF_FILE")
-		done
-		
-		if [ ${#backup_files[@]} -gt 0 ]; then
-			BACKUP_DONE=true
-		fi
-
-	# Registrar los archivos respaldados en el archivo de log
-	
-	if [ "$BACKUP_DONE" = true ]; then
-		echo " " >> "$LOG_FILE"
-		echo "=====================================================================================" >> "$LOG_FILE"
-		echo "$DATE : Ejecución manual" >> "$LOG_FILE"
-		echo "=====================================================================================" >> "$LOG_FILE"
-		echo "Se crearon las siguientes copias de seguridad:" >> "$LOG_FILE"
-		echo " " >> "$LOG_FILE"
-		for file in "${backup_files[@]}"; do
-			echo "$file" >> "$LOG_FILE"
-		done
+	if [ ${#backup_files[@]} -gt 0 ]; then
+		BACKUP_DONE=true
 	fi
 
+	# Crea un respaldo de las bases de datos seleccionadas en archivos SQL individuales
+	backup_files=()
+	for index in $selected_databases; do
+		database="${DATABASES[index]}"
+		SQL_FILE="${DATE}_${database}.sql"
+
+		# Utiliza las variables $YEAR y $MONTH para determinar la ubicación de almacenamiento
+		mysqldump -u "$user" -p"$pass" "$database" > "$BACKUP_DIR/$YEAR/$MONTH/$SQL_FILE"
+		backup_files+=("$SQL_FILE")
+	done
+
+	if [ ${#backup_files[@]} -gt 0 ]; then
+		BACKUP_DONE=true
+	fi
+
+	# Crea un respaldo de los archivos .conf de VirtualHosts seleccionados en archivos individuales
+	backup_files=()
+	for index in $selected_conf_files; do
+		conf_file="${CONF_FILES[index]}"
+		conf_filename="$(basename "$conf_file")"
+		NEW_CONF_FILE="${DATE}_${conf_filename}"
+
+		# Utiliza las variables $YEAR y $MONTH para determinar la ubicación de almacenamiento
+		cp "$VIRTUALHOSTS_DIR/$conf_file" "$BACKUP_DIR/$YEAR/$MONTH/$NEW_CONF_FILE"
+		backup_files+=("$NEW_CONF_FILE")
+	done
+
+	if [ ${#backup_files[@]} -gt 0 ]; then
+		BACKUP_DONE=true
+	fi
+
+# Guardar en el log los archivos respaldados en el archivo de log
+if [ "$BACKUP_DONE" = true ]; then
+    echo " " >> "$LOG_FILE"
+    echo "=====================================================================================" >> "$LOG_FILE"
+    echo "$DATE : Ejecución manual" >> "$LOG_FILE"
+    echo "=====================================================================================" >> "$LOG_FILE"
+    
+    # Guardar en el log sitios respaldados
+    if [ ${#selected_folders[@]} -gt 0 ]; then
+        echo "Sitios respaldados:" >> "$LOG_FILE"
+        for index in $selected_folders; do
+            folder="${SITIOS[index]}"
+            echo "$(basename "$folder")" >> "$LOG_FILE"
+        done
+    else
+		echo "" >> "$LOG_FILE"
+        echo "Sitios respaldados: ninguno" >> "$LOG_FILE"
+    fi
+
+    # Guardar en el log bases de datos respaldadas
+    if [ ${#selected_databases[@]} -gt 0 ]; then
+        echo "Bases de datos respaldadas:" >> "$LOG_FILE"
+        for index in $selected_databases; do
+            echo "${DATABASES[index]}" >> "$LOG_FILE"
+        done
+    else
+		echo "" >> "$LOG_FILE"
+        echo "Bases de datos respaldadas: ninguno" >> "$LOG_FILE"
+    fi
+
+    # Registrar archivos .conf de VirtualHosts respaldados
+    if [ ${#selected_conf_files[@]} -gt 0 ]; then
+        echo "Configuraciones de VirtualHosts respaldadas:" >> "$LOG_FILE"
+        for index in $selected_conf_files; do
+            echo "${CONF_FILES[index]}" >> "$LOG_FILE"
+        done
+    else
+        echo "" >> "$LOG_FILE"
+        echo "Configuraciones de VirtualHosts respaldadas: ninguno" >> "$LOG_FILE"
+    fi
+fi
 
     # Saludo final del modo manual
     
