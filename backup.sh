@@ -1,7 +1,7 @@
 #!/bin/bash
 # CREALIB SERVER BACKUP (CSB) Ver. 2.1
 # Autor: Charlie Martínez <cmartinez@crealib.net>
-# Licencia: GPLv2
+# Licencia: GPLv2 https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
 # Cambios versión 2.1: Ya no borra luego de 5 años y ahora no hace uso del comando "mv"; se agregan comprobaciones.
 
 # ********************************************************* DOCUMENTACIÓN *********************************************************
