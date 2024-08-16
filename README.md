@@ -16,7 +16,7 @@ Los siguientes comandos deben ejecutarse desde el usuario root o mediante "sudo"
 1. Establecer las rutas de almacenamiento de los respaldos, logs y las credenciales del usuario root de BBDD,<br> en el apartado CONFIGURACIÓN del código:
 
 ```sh
-backup.sh
+nano backup.sh
 ```
 Contenido del fichero:
 ```sh
