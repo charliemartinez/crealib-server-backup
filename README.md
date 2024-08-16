@@ -68,3 +68,27 @@ Contenido del fichero:
 ```sh
 0 2 1 * * /usr/local/bin/backup
 ```
+
+### Manual de uso
+
+#### Modo automático / Respaldo total: 
+
+Cron lo ejecutará en modo automático, del mismo modo que podemos ejecutarlo nosotros cuando necesitemos hacer un backup de TODO en un momento fuera del programado, utilizando el comando:
+
+```sh
+0 2 1 * * /usr/local/bin/backup
+```
+
+#### Modo manual / Respaldo selectivo:
+
+En lugar de respaldar todo, CSB nos mostrará un menú para que podamos elegir cuales son los sitios, bases de datos y ficheros de configuración de virtualhost que queremos resguardar. 
+Basta con añadir el modificador --manual de la siguiente manera:
+
+```sh
+backup --manual
+```
+También válido:
+
+```sh
+backup -m
+```
