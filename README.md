@@ -2,6 +2,9 @@
 **Autor:** Charlie Martínez
 **Licencia:** GPLv2
 
+![Crealib Server Backup](https://charliemartinez.com.ar/wp-content/uploads/2023/11/crealib-server-backup_charlie-martinez.jpg)
+
+
 ## Documentación
 
 - Este programa escanea los sitios que tenemos en nuestro servidor Apache, junto con sus BBDD y los ficheros de configuración de los virtualhosts.
