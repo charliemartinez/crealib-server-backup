@@ -46,7 +46,7 @@ mv backup.sh /usr/local/bin/backup
 3. Otorgar permisos de ejecución al comando:
 
 ```sh
-chmod 700 /usr/local/bin/backup
+chmod +x /usr/local/bin/backup
 ```
 
 4. Crear excepción en **/etc/sudoers.d/backup** para que no solicite contraseña a crontab:
