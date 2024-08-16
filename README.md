@@ -2,12 +2,14 @@
 **Autor:** Charlie Martínez
 **Licencia:** GPLv2
 
+## Documentación
+
 - Este programa escanea los sitios que tenemos en nuestro servidor Apache, junto con sus BBDD y los ficheros de configuración de los virtualhosts.
 - Guarda las carpetas de los sitios en archivadores .tar.gz individuales y los .sql en la raíz en carpetas correspondientes a su año/mes.
 - En modo manual, permite elegir qué sitios, bases de datos y ficheros de configuración de virtualhost respaldar.
 - Finalizada la ejecución, informa lo realizado y almacena esa información en un LOG progresivo.
 
-## Configuración:
+### Configuración:
 
 1. Establecer las rutas de almacenamiento de los respaldos, logs y las credenciales del usuario root de BBDD,<br> en el apartado CONFIGURACIÓN del código:
 
