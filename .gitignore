@@ -1,0 +1,4 @@
+sasl_passwd*
+*.bak
+*.sql
+*.sql.gz

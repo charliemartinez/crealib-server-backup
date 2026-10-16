@@ -1,0 +1,77 @@
+#!/bin/bash
+# csb-prune - Rotación de copias para CSB (CREALIB SERVER BACKUP)
+# Licencia GPLv2. Sin argumentos: solo simula. Con --aplicar: borra.
+#
+# Política por defecto:
+#   - Conserva TODAS las copias de los últimos KEEP_DAYS días.
+#   - Además conserva la copia más completa (más ficheros) de cada uno de los últimos KEEP_MONTHS meses.
+#   - Borra el resto, usando "csb --eliminar" (pasa por las validaciones de csb).
+#
+# Salvaguardas (si no se cumplen, no borra nada):
+#   1. Debe existir una copia completa (>= MIN_FILES_FULL ficheros) de los últimos 2 días.
+#   2. Después de borrar deben quedar al menos MIN_SETS copias.
+
+export LC_ALL=C
+BACKUP_DIR="${BACKUP_DIR:-/mnt/pool-bulk/backups-sitios}"
+CSB_BIN="${CSB_BIN:-/usr/local/bin/csb}"
+KEEP_DAYS="${KEEP_DAYS:-14}"
+KEEP_MONTHS="${KEEP_MONTHS:-12}"
+MIN_SETS="${MIN_SETS:-3}"
+MIN_FILES_FULL="${MIN_FILES_FULL:-20}"
+APPLY=0
+[ "${1:-}" = "--aplicar" ] && APPLY=1
+
+mountpoint -q "$BACKUP_DIR" || { echo "ERROR: $BACKUP_DIR no está montado" >&2; exit 1; }
+
+# Una entrada por copia: "FECHA NUM_FICHEROS", de la más antigua a la más reciente
+mapfile -t SETS < <(find "$BACKUP_DIR" -mindepth 3 -maxdepth 3 -type f -printf '%f\n' \
+    | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}(-[0-9]{2})?' | sort | uniq -c | awk '{print $2, $1}')
+[ ${#SETS[@]} -gt 0 ] || { echo "No hay copias"; exit 0; }
+
+cutoff=$(date -d "-${KEEP_DAYS} days" +%Y-%m-%d_%H-%M-%S)
+limit2=$(date -d "-2 days" +%Y-%m-%d_%H-%M-%S)
+
+# Salvaguarda 1: sin copia completa reciente, algo falla: no se borra nada
+recent_full=0
+for e in "${SETS[@]}"; do
+    d=${e% *}
+    n=${e#* }
+    [[ "$d" > "$limit2" && "$n" -ge "$MIN_FILES_FULL" ]] && recent_full=1
+done
+[ "$recent_full" = 1 ] || { echo "ERROR: no hay copia completa en los últimos 2 días; no borro nada" >&2; exit 1; }
+
+# La copia con más ficheros de cada mes (a igualdad, la más antigua)
+declare -A BEST_N BEST_D KEEP
+for e in "${SETS[@]}"; do
+    d=${e% *}
+    n=${e#* }
+    m=${d:0:7}
+    if [ "$n" -gt "${BEST_N[$m]:-0}" ]; then BEST_N[$m]=$n; BEST_D[$m]=$d; fi
+done
+for m in $(printf '%s\n' "${!BEST_D[@]}" | sort -r | head -n "$KEEP_MONTHS"); do
+    KEEP[${BEST_D[$m]}]=1
+done
+
+DEL=()
+for e in "${SETS[@]}"; do
+    d=${e% *}
+    [[ "$d" > "$cutoff" ]] && continue
+    [ -n "${KEEP[$d]:-}" ] && continue
+    DEL+=("$d")
+done
+
+# Salvaguarda 2: siempre quedan al menos MIN_SETS copias
+if [ $(( ${#SETS[@]} - ${#DEL[@]} )) -lt "$MIN_SETS" ]; then
+    echo "ERROR: quedarían menos de $MIN_SETS copias; no borro nada" >&2
+    exit 1
+fi
+
+echo "$(date +%F_%T) copias: ${#SETS[@]}, a conservar: $(( ${#SETS[@]} - ${#DEL[@]} )), a borrar: ${#DEL[@]}"
+for d in "${DEL[@]}"; do
+    if [ "$APPLY" = 1 ]; then
+        "$CSB_BIN" --eliminar "$d" --si
+    else
+        echo "  borraría: $d"
+    fi
+done
+[ "$APPLY" = 1 ] || echo "(simulación; usa --aplicar para borrar)"

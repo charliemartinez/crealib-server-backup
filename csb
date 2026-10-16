@@ -1,0 +1,838 @@
+#!/bin/bash
+# CREALIB SERVER BACKUP (CSB) Ver. 3.2 - Edición Proxmox
+# Basado en CSB 2.1 de Charlie Martínez <cmartinez@crealib.net> - Licencia GPLv2
+#
+# Se ejecuta en el HOST Proxmox y trabaja contra los contenedores con "pct exec":
+#   - Sitios y VirtualHosts de Apache: contenedor WEB_CT (y VirtualHosts del proxy: PROXY_CT)
+#   - Bases de datos: MariaDB (y opcionalmente PostgreSQL) del contenedor DB_CT
+#
+# Uso:
+#   csb                          Copia completa (modo automático)
+#   csb -m | --manual            Menú: crear copias o gestionar las existentes
+#   csb -g | --gestionar         Menú de gestión: ver, verificar, restaurar y eliminar copias
+#   csb --sitio NOMBRE ...       Copia de uno o más sitios, con sus bases de datos
+#   csb --listar                 Sitios y bases de datos de cada uno (también WordPress en subcarpetas)
+#   csb --copias                 Lista las copias almacenadas
+#   csb --verificar FECHA        Comprueba la integridad de una copia
+#   csb --restaurar sitio FECHA NOMBRE      Ficheros y bases de datos de un sitio
+#   csb --restaurar archivos FECHA NOMBRE   Solo los ficheros de un sitio
+#   csb --restaurar bd FECHA NOMBRE         Solo una base de datos
+#   csb --restaurar apache FECHA CT [RUTA]  Configuración de Apache de un contenedor
+#                                           (sin RUTA: todo; con RUTA: ficheros concretos)
+#   csb --eliminar FECHA         Elimina una copia completa
+#   csb -h | --help              Esta ayuda
+#
+# FECHA es la que muestra "csb --copias". Añade --si para no pedir confirmación.
+# Antes de restaurar, el script guarda el estado actual como una copia nueva.
+# Este script NO borra copias antiguas por su cuenta: para eso existe csb-prune.
+
+set -o pipefail
+umask 077
+
+# ********************************************************** CONFIGURACIÓN ********************************************************
+# Cualquier valor puede sobrescribirse desde el entorno, por ejemplo: BACKUP_DIR=/otra/ruta csb
+
+WEB_CT="${WEB_CT:-101}"                                   # Contenedor con los sitios web
+DB_CT="${DB_CT:-103}"                                     # Contenedor con las bases de datos
+PROXY_CT="${PROXY_CT-100}"                                # Contenedor proxy (vacío para omitirlo)
+WWW_DIR="${WWW_DIR:-/var/www}"                            # Carpeta de sitios dentro de WEB_CT
+VHOSTS_DIRS=("/etc/apache2/sites-available" "/etc/apache2/sites-enabled"
+             "/etc/apache2/conf-available" "/etc/apache2/conf-enabled")
+
+BACKUP_DIR="${BACKUP_DIR:-/mnt/pool-bulk/backups-sitios}" # Destino (idealmente en discos distintos a los de los datos)
+LOG_FILE="${LOG_FILE:-$BACKUP_DIR/backup_log.txt}"
+REQUIRE_MOUNTPOINT="${REQUIRE_MOUNTPOINT:-1}"             # 1 = exige que BACKUP_DIR sea un punto de montaje
+MIN_FREE_GB="${MIN_FREE_GB:-20}"                          # No crea copias si queda menos espacio libre
+BACKUP_POSTGRES="${BACKUP_POSTGRES:-1}"                   # 1 = también PostgreSQL (pg_dumpall) en DB_CT
+
+TITLE="CREALIB SERVER BACKUP (CSB)"
+ASSUME_YES=0
+VERBOSE=0
+ERRORS=0
+CREATED=()
+MAP=()
+declare -A DB_DONE=()
+ALL_SITES=()
+ALL_DBS=()
+SITES=()
+EXTRA_DBS=()
+DO_POSTGRES=0
+DATE="" YEAR="" MONTH="" DEST=""
+
+# ************************************************************ FUNCIONES ******************************************************
+
+log()  { [ -w "$LOG_FILE" ] && echo "$(date +'%Y-%m-%d_%H-%M-%S') : $*" >> "$LOG_FILE"; return 0; }
+info() { log "$*"; if [ -t 1 ] || [ "$VERBOSE" = 1 ]; then echo "$*"; fi; return 0; }
+say()  { log "$*"; echo "$*"; }
+warn() { log "AVISO: $*"; echo "AVISO: $*" >&2; }
+fail() { log "ERROR: $*"; echo "ERROR: $*" >&2; ERRORS=$((ERRORS + 1)); }
+die()  { log "ERROR: $*"; echo "ERROR: $*" >&2; exit 1; }
+
+usage() { sed -n '/^# CREALIB/,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+
+# Ejecuta un comando dentro de un contenedor (sin consumir la entrada estándar)
+en_ct() { local id=$1; shift; pct exec "$id" -- "$@" < /dev/null; }
+
+in_array() { local x=$1 y; shift; for y in "$@"; do [ "$x" = "$y" ] && return 0; done; return 1; }
+
+valid_date() { [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}(-[0-9]{2})?$ ]]; }
+valid_name() { [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]; }
+set_dir()    { echo "$BACKUP_DIR/${1:0:4}/${1:5:2}"; }
+
+# Fecha y carpeta de destino de la operación en curso (se renueva en cada operación)
+new_stamp() {
+    DATE=$(date +'%Y-%m-%d_%H-%M-%S')
+    YEAR=${DATE:0:4}
+    MONTH=${DATE:5:2}
+    DEST="$BACKUP_DIR/$YEAR/$MONTH"
+    CREATED=()
+    MAP=()
+    DB_DONE=()
+}
+
+ensure_dest() { [ -d "$DEST" ] || mkdir -p "$DEST" || die "No pude crear $DEST"; }
+
+confirm() {
+    [ "$ASSUME_YES" = 1 ] && return 0
+    if [ -t 0 ] && [ -t 1 ]; then
+        local r
+        read -r -p "$1 Escribe SI para continuar: " r
+        [ "$r" = "SI" ] && return 0
+        warn "Operación cancelada."
+    else
+        warn "Hace falta confirmación interactiva; añade --si para continuar sin preguntar."
+    fi
+    ERRORS=$((ERRORS + 1))
+    return 1
+}
+
+# ---- Copias: crear ----
+
+# Bases de datos de un sitio: lee DB_NAME de cada wp-config.php que haya dentro del sitio,
+# también en subcarpetas (por ejemplo WordPress de pruebas en dev/stage/...)
+site_dbs() {
+    local f
+    while IFS= read -r f; do
+        en_ct "$WEB_CT" cat "$f" 2> /dev/null \
+            | sed -nE "s/^[[:space:]]*define\([[:space:]]*['\"]DB_NAME['\"][[:space:]]*,[[:space:]]*['\"]([^'\"]+)['\"].*/\1/p" \
+            | head -n1
+    done < <(en_ct "$WEB_CT" find "$WWW_DIR/$1" -maxdepth 8 -name wp-config.php -not -path '*/wp-content/*' 2> /dev/null) | sort -u
+}
+
+# Crea un tar.gz de una ruta de un contenedor y lo verifica. Si algo falla borra el fichero parcial.
+#   $1 = contenedor, $2 = fichero de salida, resto = argumentos para tar (sin -czf)
+tar_ct() {
+    local id=$1 out=$2 err unexpected
+    shift 2
+    [ -e "$out" ] && { warn "Ya existe $out; no lo sobrescribo"; return 1; }
+    err=$(mktemp)
+    en_ct "$id" tar -czf - "$@" > "$out" 2> "$err"
+    # "file changed as we read it" es normal en sitios activos; cualquier otro mensaje es un problema
+    unexpected=$(grep -vE 'file changed as we read it|Removing leading|socket ignored' "$err" | head -n3)
+    rm -f "$err"
+    if [ -s "$out" ] && gzip -t "$out" 2> /dev/null && tar -tzf "$out" > /dev/null 2>&1 && [ -z "$unexpected" ]; then
+        return 0
+    fi
+    [ -n "$unexpected" ] && warn "tar dijo: $unexpected"
+    rm -f "$out"
+    return 1
+}
+
+backup_db() {
+    local db=$1 out last
+    [ -n "${DB_DONE[$db]:-}" ] && return 0
+    DB_DONE[$db]=1
+    ensure_dest
+    out="$DEST/${DATE}_${db}.sql.gz"
+    [ -e "$out" ] && { fail "Ya existe $out; no lo sobrescribo"; return 1; }
+    en_ct "$DB_CT" mariadb-dump --single-transaction --routines --events "$db" | gzip > "$out"
+    last=$(zcat "$out" 2> /dev/null | tail -n1)
+    # El volcado es válido si el gzip está íntegro y mariadb-dump llegó a escribir su última línea
+    if gzip -t "$out" 2> /dev/null && [[ "$last" == "-- Dump completed"* ]]; then
+        CREATED+=("$out")
+        info "Base de datos respaldada: $db"
+        return 0
+    fi
+    rm -f "$out"
+    fail "Falló el volcado de la base de datos '$db'"
+    return 1
+}
+
+backup_postgres() {
+    local out
+    [ "$BACKUP_POSTGRES" = 1 ] || return 0
+    if ! en_ct "$DB_CT" sh -c 'command -v pg_dumpall' > /dev/null 2>&1; then
+        info "PostgreSQL no encontrado en el CT $DB_CT: omitido"
+        return 0
+    fi
+    ensure_dest
+    out="$DEST/${DATE}_postgresql-ct${DB_CT}.sql.gz"
+    [ -e "$out" ] && { fail "Ya existe $out; no lo sobrescribo"; return 1; }
+    # "cd /tmp" evita el aviso 'could not change directory to "/root"' de su/postgres
+    en_ct "$DB_CT" su -s /bin/sh postgres -c "cd /tmp && pg_dumpall" | gzip > "$out"
+    # pg_dumpall termina con "cluster dump complete" seguido de "--" y una línea en blanco
+    # (las versiones recientes añaden además "\unrestrict"), por eso se miran las últimas líneas.
+    if gzip -t "$out" 2> /dev/null && zcat "$out" | tail -n 5 | grep -q "cluster dump complete"; then
+        CREATED+=("$out")
+        info "PostgreSQL respaldado (CT $DB_CT)"
+        return 0
+    fi
+    rm -f "$out"
+    fail "Falló el volcado de PostgreSQL del CT $DB_CT"
+    return 1
+}
+
+backup_site_files() {
+    local s=$1 out
+    ensure_dest
+    out="$DEST/${DATE}_${s}.tar.gz"
+    if tar_ct "$WEB_CT" "$out" -C "$WWW_DIR" "$s"; then
+        CREATED+=("$out")
+        info "Sitio respaldado: $s"
+        return 0
+    fi
+    fail "Falló la copia del sitio '$s'"
+    return 1
+}
+
+backup_site() {
+    local s=$1 db dbs=()
+    backup_site_files "$s" || return 1
+    mapfile -t dbs < <(site_dbs "$s")
+    if [ ${#dbs[@]} -eq 0 ]; then
+        MAP+=("$s -> (sin base de datos WordPress detectada)")
+        return 0
+    fi
+    for db in "${dbs[@]}"; do
+        if in_array "$db" "${ALL_DBS[@]}"; then
+            MAP+=("$s -> $db")
+            backup_db "$db"
+        else
+            warn "El sitio '$s' declara la base de datos '$db', que no existe en el CT $DB_CT: la omito"
+        fi
+    done
+    return 0
+}
+
+backup_conf() {
+    local id=$1 out p paths=()
+    ensure_dest
+    out="$DEST/${DATE}_apache-conf-ct${id}.tar.gz"
+    for p in "${VHOSTS_DIRS[@]}"; do paths+=("${p#/}"); done
+    if tar_ct "$id" "$out" -C / "${paths[@]}"; then
+        CREATED+=("$out")
+        info "Configuración de Apache respaldada (CT $id)"
+        return 0
+    fi
+    fail "Falló la copia de la configuración de Apache del CT $id"
+    return 1
+}
+
+run_backup() {
+    local s d
+    for s in "${SITES[@]}"; do backup_site "$s"; done
+    for d in "${EXTRA_DBS[@]}"; do backup_db "$d"; done
+    [ "$DO_POSTGRES" = 1 ] && backup_postgres
+    # La configuración de Apache es pequeña: se copia siempre
+    backup_conf "$WEB_CT"
+    [ -n "$PROXY_CT" ] && backup_conf "$PROXY_CT"
+    return 0
+}
+
+# Relación sitio -> base de datos, sumas de control y resumen de la operación
+finalize() {
+    local f total
+    if [ ${#MAP[@]} -gt 0 ]; then
+        ensure_dest
+        f="$DEST/${DATE}_mapa-sitios-bbdd.txt"
+        printf '%s\n' "${MAP[@]}" > "$f"
+        CREATED+=("$f")
+    fi
+    if [ ${#CREATED[@]} -gt 0 ]; then
+        ( cd "$DEST" && sha256sum "${CREATED[@]##*/}" > "${DATE}_SHA256SUMS.txt" )
+        log "Se crearon las siguientes copias de seguridad:"
+        for f in "${CREATED[@]}"; do log "  ${f##*/}"; done
+        total=$(du -ch "${CREATED[@]}" 2> /dev/null | tail -n1 | cut -f1)
+    fi
+    RESUMEN="CSB ($MODE): ${#CREATED[@]} ficheros creados (${total:-0}) en $DEST - errores: $ERRORS"
+    log "$RESUMEN"
+    echo "$RESUMEN"
+}
+
+# ---- Copias: consultar ----
+
+list_sets() {
+    find "$BACKUP_DIR" -mindepth 3 -maxdepth 3 -type f -printf '%f\n' 2> /dev/null \
+        | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}(-[0-9]{2})?' | sort -ru
+}
+
+# Nombres contenidos en una copia: sitios | bd
+set_names() {
+    local d=$1 kind=$2 dir f b
+    dir=$(set_dir "$d")
+    for f in "$dir/${d}_"*; do
+        [ -e "$f" ] || continue
+        b=${f##*/}
+        b=${b#"${d}_"}
+        case "$kind:$b" in
+            sitios:apache-conf-*) ;;
+            sitios:*.tar.gz) echo "${b%.tar.gz}" ;;
+            bd:postgresql-*) ;;
+            bd:*.sql.gz) echo "${b%.sql.gz}" ;;
+        esac
+    done
+}
+
+set_summary() {
+    local d=$1 dir files size names
+    dir=$(set_dir "$d")
+    files=("$dir/${d}_"*)
+    size=$(du -ch "${files[@]}" 2> /dev/null | tail -n1 | cut -f1)
+    names=$(set_names "$d" sitios | paste -sd, -)
+    echo "${#files[@]} ficheros, ${size:-0}${names:+; sitios: $names}"
+}
+
+cmd_copias() {
+    local d n=0
+    for d in $(list_sets); do
+        printf '%-20s %s\n' "$d" "$(set_summary "$d")"
+        n=$((n + 1))
+    done
+    [ "$n" -gt 0 ] || echo "No hay copias en $BACKUP_DIR"
+}
+
+verify_set() {
+    local d=$1 dir sums f bad=0
+    dir=$(set_dir "$d")
+    sums="$dir/${d}_SHA256SUMS.txt"
+    echo
+    echo "Verificación:"
+    if [ -f "$sums" ]; then
+        if (cd "$dir" && sha256sum --quiet -c "${d}_SHA256SUMS.txt" 2>&1); then
+            echo "  Sumas de control: OK"
+        else
+            fail "Las sumas de control no coinciden en la copia $d"
+            bad=1
+        fi
+    else
+        echo "  (esta copia no tiene fichero de sumas de control)"
+    fi
+    for f in "$dir/${d}_"*.gz; do
+        [ -e "$f" ] || continue
+        gzip -t "$f" 2> /dev/null || { fail "Fichero dañado: ${f##*/}"; bad=1; }
+    done
+    [ "$bad" -eq 0 ] && echo "  Ficheros comprimidos: OK"
+    return "$bad"
+}
+
+show_set() {
+    local d=$1 dir files f
+    valid_date "$d" || { fail "Fecha no válida: $d"; return 1; }
+    dir=$(set_dir "$d")
+    files=("$dir/${d}_"*)
+    [ -e "${files[0]}" ] || { fail "No existe la copia $d"; return 1; }
+    echo "Copia $d  ($dir)"
+    echo
+    for f in "${files[@]}"; do
+        printf '%8s  %s\n' "$(du -h "$f" | cut -f1)" "${f##*/}"
+    done
+    verify_set "$d"
+}
+
+# ---- Copias: eliminar ----
+
+rs_eliminar() {
+    local d=$1 dir files
+    valid_date "$d" || { fail "Fecha no válida: $d"; return 1; }
+    dir=$(set_dir "$d")
+    files=("$dir/${d}_"*)
+    [ -e "${files[0]}" ] || { fail "No existe la copia $d"; return 1; }
+    confirm "Se eliminarán ${#files[@]} ficheros de la copia $d. No se puede deshacer." || return 1
+    rm -f -- "${files[@]}"
+    rmdir "$dir" "$(dirname "$dir")" 2> /dev/null
+    say "Copia eliminada: $d"
+    return 0
+}
+
+# $1 = FECHA, resto = nombres de fichero sin el prefijo de fecha
+delete_files() {
+    local d=$1 dir sums n
+    shift
+    valid_date "$d" || { fail "Fecha no válida: $d"; return 1; }
+    dir=$(set_dir "$d")
+    sums="$dir/${d}_SHA256SUMS.txt"
+    for n in "$@"; do
+        valid_name "$n" || { fail "Nombre no válido: $n"; continue; }
+        if [ -f "$dir/${d}_${n}" ]; then
+            rm -f -- "$dir/${d}_${n}" && say "Eliminado: ${d}_${n}"
+            if [ -f "$sums" ] && [ "$n" != "SHA256SUMS.txt" ]; then
+                awk -v f="${d}_${n}" '$2 != f' "$sums" > "$sums.tmp" && mv "$sums.tmp" "$sums"
+            fi
+        else
+            fail "No existe: ${d}_${n}"
+        fi
+    done
+    rmdir "$dir" "$(dirname "$dir")" 2> /dev/null
+    return 0
+}
+
+# ---- Copias: restaurar ----
+
+# Ficheros de un sitio. Antes guarda el estado actual y sustituye la carpeta de forma atómica.
+restore_files() {
+    local d=$1 s=$2 f
+    f="$(set_dir "$d")/${d}_${s}.tar.gz"
+    [ -f "$f" ] || { fail "No existe la copia de ficheros de '$s' en $d"; return 1; }
+    if ! { gzip -t "$f" 2> /dev/null && tar -tzf "$f" > /dev/null 2>&1; }; then
+        fail "La copia de '$s' ($d) está dañada; no restauro"
+        return 1
+    fi
+    if en_ct "$WEB_CT" test -d "$WWW_DIR/$s"; then
+        say "Guardando el estado actual de '$s' antes de restaurar..."
+        backup_site_files "$s" || { fail "No pude guardar el estado actual de '$s'; no restauro nada."; return 1; }
+    fi
+    pct push "$WEB_CT" "$f" /tmp/csb-restore.tar.gz --perms 600 || { fail "No pude enviar la copia al CT $WEB_CT"; return 1; }
+    if en_ct "$WEB_CT" sh -c '
+            cd "$1" || exit 1
+            trap "rm -rf .csb-new /tmp/csb-restore.tar.gz" EXIT
+            rm -rf .csb-new .csb-old
+            mkdir .csb-new
+            tar -xzf /tmp/csb-restore.tar.gz -C .csb-new || exit 1
+            [ -d ".csb-new/$2" ] || exit 1
+            if [ -e "$2" ]; then mv "$2" .csb-old || exit 1; fi
+            if ! mv ".csb-new/$2" "$2"; then
+                [ -e .csb-old ] && mv .csb-old "$2"
+                exit 1
+            fi
+            rm -rf .csb-old' sh "$WWW_DIR" "$s"; then
+        say "Sitio restaurado: $s (copia $d)"
+        return 0
+    fi
+    fail "Falló la restauración de los ficheros de '$s' (el sitio sigue como estaba)"
+    return 1
+}
+
+# Base de datos. Antes guarda el estado actual. Sustituye las tablas que trae la copia.
+restore_db() {
+    local d=$1 db=$2 f
+    f="$(set_dir "$d")/${d}_${db}.sql.gz"
+    [ "$db" != "mysql" ] || { fail "No restauro la base de sistema 'mysql' (usuarios y permisos) desde aquí; hazlo a mano."; return 1; }
+    [ -f "$f" ] || { fail "No existe la copia de la base de datos '$db' en $d"; return 1; }
+    if ! gzip -t "$f" 2> /dev/null || [[ "$(zcat "$f" | tail -n1)" != "-- Dump completed"* ]]; then
+        fail "La copia de '$db' ($d) está dañada o incompleta; no restauro"
+        return 1
+    fi
+    if in_array "$db" "${ALL_DBS[@]}"; then
+        say "Guardando el estado actual de '$db' antes de restaurar..."
+        backup_db "$db" || { fail "No pude guardar el estado actual de '$db'; no restauro nada."; return 1; }
+    fi
+    pct push "$DB_CT" "$f" /tmp/csb-restore.sql.gz --perms 600 || { fail "No pude enviar la copia al CT $DB_CT"; return 1; }
+    if en_ct "$DB_CT" sh -c '
+            trap "rm -f /tmp/csb-restore.sql.gz" EXIT
+            mariadb -e "CREATE DATABASE IF NOT EXISTS \`$1\`" && zcat /tmp/csb-restore.sql.gz | mariadb "$1"' sh "$db"; then
+        say "Base de datos restaurada: $db (copia $d)"
+        return 0
+    fi
+    fail "Falló la restauración de la base de datos '$db'"
+    return 1
+}
+
+# Bases de datos de un sitio según el mapa de esa copia (una por línea)
+site_dbs_from_set() {
+    local m
+    m="$(set_dir "$1")/${1}_mapa-sitios-bbdd.txt"
+    [ -f "$m" ] || return 0
+    awk -F' -> ' -v s="$2" '$1 == s && $2 !~ /^\(/ {print $2}' "$m"
+}
+
+rs_sitio() {
+    local d=$1 s=$2 db dbs=() present=()
+    valid_date "$d" && valid_name "$s" || { fail "Fecha o nombre no válidos"; return 1; }
+    [ -f "$(set_dir "$d")/${d}_${s}.tar.gz" ] || { fail "La copia $d no contiene el sitio '$s'"; return 1; }
+    mapfile -t dbs < <(site_dbs_from_set "$d" "$s")
+    for db in "${dbs[@]}"; do
+        if [ -f "$(set_dir "$d")/${d}_${db}.sql.gz" ]; then present+=("$db"); fi
+    done
+    confirm "Se reemplazará el sitio '$s' (CT $WEB_CT)${present[*]:+ y sus bases de datos: ${present[*]}} por la copia $d. Antes se guardará el estado actual." || return 1
+    restore_files "$d" "$s" || return 1
+    for db in "${present[@]}"; do
+        restore_db "$d" "$db" || return 1
+    done
+    return 0
+}
+
+rs_archivos() {
+    local d=$1 s=$2
+    valid_date "$d" && valid_name "$s" || { fail "Fecha o nombre no válidos"; return 1; }
+    confirm "Se reemplazarán los ficheros del sitio '$s' (CT $WEB_CT) por los de la copia $d. Antes se guardará el estado actual." || return 1
+    restore_files "$d" "$s"
+}
+
+rs_bd() {
+    local d=$1 db=$2
+    valid_date "$d" && valid_name "$db" || { fail "Fecha o nombre no válidos"; return 1; }
+    confirm "Se sobrescribirán las tablas de la base de datos '$db' (CT $DB_CT) con las de la copia $d. Antes se guardará el estado actual." || return 1
+    restore_db "$d" "$db"
+}
+
+# Configuración de Apache de un contenedor. Si Apache rechaza el resultado, deshace los cambios.
+#   $1 = FECHA, $2 = CT, resto = rutas concretas (etc/apache2/...); sin rutas se restaura todo
+rs_apache() {
+    local d=$1 id=$2 f pre out rc written new p
+    shift 2
+    valid_date "$d" || { fail "Fecha no válida: $d"; return 1; }
+    if ! { [ "$id" = "$WEB_CT" ] || { [ -n "$PROXY_CT" ] && [ "$id" = "$PROXY_CT" ]; }; }; then
+        fail "El CT '$id' no es uno de los gestionados ($WEB_CT${PROXY_CT:+, $PROXY_CT})"
+        return 1
+    fi
+    for p in "$@"; do
+        if ! [[ "$p" =~ ^etc/apache2/[A-Za-z0-9._@+/-]+$ ]] || [[ "$p" == *..* ]]; then
+            fail "Ruta no válida: $p"
+            return 1
+        fi
+    done
+    f="$(set_dir "$d")/${d}_apache-conf-ct${id}.tar.gz"
+    [ -f "$f" ] || { fail "La copia $d no contiene la configuración de Apache del CT $id"; return 1; }
+    { gzip -t "$f" 2> /dev/null && tar -tzf "$f" > /dev/null 2>&1; } || { fail "La copia está dañada; no restauro"; return 1; }
+    if [ $# -gt 0 ]; then
+        written=$(printf '%s\n' "$@")
+    else
+        written=$(tar -tzf "$f" | grep -v '/$')
+    fi
+    confirm "Se restaurará la configuración de Apache del CT $id ($([ $# -gt 0 ] && echo "$# ficheros" || echo "todos los ficheros")) desde la copia $d. Antes se guardará el estado actual y, si Apache no valida el resultado, se deshará." || return 1
+
+    say "Guardando el estado actual de la configuración del CT $id..."
+    backup_conf "$id" || { fail "No pude guardar el estado actual; no restauro nada."; return 1; }
+    pre="$DEST/${DATE}_apache-conf-ct${id}.tar.gz"
+
+    pct push "$id" "$f" /tmp/csb-restore.tar.gz --perms 600 || { fail "No pude enviar la copia al CT $id"; return 1; }
+    en_ct "$id" tar -xzf /tmp/csb-restore.tar.gz -C / "$@"
+    rc=$?
+    en_ct "$id" rm -f /tmp/csb-restore.tar.gz
+
+    if [ "$rc" -eq 0 ] && out=$(en_ct "$id" apachectl configtest 2>&1); then
+        if en_ct "$id" systemctl reload apache2; then
+            say "Configuración de Apache restaurada y recargada (CT $id, copia $d)"
+            return 0
+        fi
+        fail "Apache aceptó la configuración pero no pudo recargarse (CT $id)"
+        return 1
+    fi
+
+    # Deshacer: volver a extraer el estado previo y borrar los ficheros nuevos que trajo la copia
+    warn "Apache no valida la configuración restaurada (CT $id): ${out:-error al extraer}"
+    new=$(comm -23 <(printf '%s\n' "$written" | sort) <(tar -tzf "$pre" | grep -v '/$' | sort))
+    pct push "$id" "$pre" /tmp/csb-restore.tar.gz --perms 600
+    en_ct "$id" tar -xzf /tmp/csb-restore.tar.gz -C /
+    while IFS= read -r p; do
+        if [[ "$p" == etc/apache2/* ]]; then en_ct "$id" rm -f -- "/$p"; fi
+    done <<< "$new"
+    en_ct "$id" rm -f /tmp/csb-restore.tar.gz
+    fail "No se restauró la configuración de Apache del CT $id: se deshicieron los cambios"
+    return 1
+}
+
+cmd_restaurar() {
+    local tipo=${ARGS[0]:-} d=${ARGS[1]:-} n=${ARGS[2]:-}
+    if [ -z "$d" ] || [ -z "$n" ]; then
+        echo "Uso: csb --restaurar {sitio|archivos|bd|apache} FECHA NOMBRE   (las fechas salen de: csb --copias)" >&2
+        exit 1
+    fi
+    case "$tipo" in
+        sitio)    rs_sitio "$d" "$n" ;;
+        archivos) rs_archivos "$d" "$n" ;;
+        bd)       rs_bd "$d" "$n" ;;
+        apache)   rs_apache "$d" "$n" "${ARGS[@]:3}" ;;
+        *)        echo "Tipo de restauración desconocido: $tipo" >&2; exit 1 ;;
+    esac
+}
+
+# ---- Menús (dialog). El descriptor 3 apunta al terminal y lo abre el programa principal ----
+
+menu_checklist() {
+    local title=$1 n lh o args=()
+    shift
+    n=$#
+    lh=$n
+    [ "$lh" -gt 14 ] && lh=14
+    for o in "$@"; do args+=("$o" "" off); done
+    dialog --separate-output --backtitle "$TITLE" --checklist "$title" 0 0 "$lh" "${args[@]}" 2>&1 1>&3
+}
+
+pick_one() {
+    local title=$1 o items=()
+    shift
+    for o in "$@"; do items+=("$o" ""); done
+    dialog --backtitle "$TITLE" --cancel-label "Volver" --menu "$title" 0 0 0 "${items[@]}" 2>&1 1>&3
+}
+
+confirm_ui() { dialog --backtitle "$TITLE" --yesno "$1" 0 0; }
+
+# Ejecuta una operación con la salida recogida y la muestra en pantalla
+ui_run() {
+    local out
+    out=$(mktemp)
+    new_stamp
+    ERRORS=0
+    ASSUME_YES=1
+    VERBOSE=1
+    { "$@"; finalize; } > "$out" 2>&1
+    ASSUME_YES=0
+    VERBOSE=0
+    dialog --backtitle "$TITLE" --title "Resultado" --textbox "$out" 0 0
+    rm -f "$out"
+    [ "$ERRORS" -eq 0 ]
+}
+
+menu_copia() {
+    local d=$1 act pick ct f b mode sel items names=() paths=() cands=()
+    while true; do
+        items=(1 "Ver contenido y verificar integridad"
+               2 "Restaurar un SITIO (ficheros + bases de datos)"
+               3 "Restaurar solo los ficheros de un sitio"
+               4 "Restaurar solo una base de datos"
+               5 "Restaurar VirtualHosts/Apache del CT $WEB_CT (servidor web)")
+        [ -n "$PROXY_CT" ] && items+=(6 "Restaurar VirtualHosts/Apache del CT $PROXY_CT (proxy)")
+        items+=(7 "Eliminar ficheros de esta copia..." 8 "Eliminar esta copia COMPLETA")
+        act=$(dialog --backtitle "$TITLE" --title "Copia $d" --cancel-label "Volver" \
+              --menu "$(set_summary "$d")" 0 0 0 "${items[@]}" 2>&1 1>&3) || return 0
+        case "$act" in
+            1) ui_run show_set "$d" ;;
+            2|3)
+                mapfile -t names < <(set_names "$d" sitios)
+                if [ ${#names[@]} -eq 0 ]; then dialog --msgbox "Esta copia no contiene sitios." 6 50; continue; fi
+                pick=$(pick_one "Sitio a restaurar:" "${names[@]}") || continue
+                if [ "$act" = 2 ]; then
+                    confirm_ui "¿Restaurar el sitio '$pick' (ficheros y sus bases de datos) con la copia $d?\n\nAntes se guardará el estado actual en una copia nueva." && ui_run rs_sitio "$d" "$pick"
+                else
+                    confirm_ui "¿Restaurar solo los ficheros de '$pick' con la copia $d?\n\nAntes se guardará el estado actual en una copia nueva." && ui_run rs_archivos "$d" "$pick"
+                fi
+                ;;
+            4)
+                mapfile -t names < <(set_names "$d" bd | grep -vx mysql)
+                if [ ${#names[@]} -eq 0 ]; then dialog --msgbox "Esta copia no contiene bases de datos restaurables." 6 56; continue; fi
+                pick=$(pick_one "Base de datos a restaurar:" "${names[@]}") || continue
+                confirm_ui "¿Restaurar la base de datos '$pick' con la copia $d?\n\nSe sobrescribirán sus tablas. Antes se guardará el estado actual en una copia nueva." && ui_run rs_bd "$d" "$pick"
+                ;;
+            5|6)
+                ct=$WEB_CT
+                [ "$act" = 6 ] && ct=$PROXY_CT
+                f="$(set_dir "$d")/${d}_apache-conf-ct${ct}.tar.gz"
+                if [ ! -f "$f" ]; then dialog --msgbox "Esta copia no incluye la configuración de Apache del CT $ct." 6 64; continue; fi
+                mode=$(dialog --backtitle "$TITLE" --cancel-label "Volver" --menu "¿Qué restaurar del CT $ct?" 0 0 0 \
+                       1 "Todos los ficheros de configuración" 2 "Elegir ficheros concretos" 2>&1 1>&3) || continue
+                paths=()
+                if [ "$mode" = 2 ]; then
+                    mapfile -t cands < <(tar -tzf "$f" | grep -v '/$')
+                    sel=$(menu_checklist "Ficheros a restaurar (CT $ct):" "${cands[@]}") || continue
+                    [ -n "$sel" ] || continue
+                    mapfile -t paths <<< "$sel"
+                fi
+                confirm_ui "¿Restaurar la configuración de Apache del CT $ct con la copia $d?\n\nAntes se guardará el estado actual y, si Apache no valida el resultado, se deshará." && ui_run rs_apache "$d" "$ct" "${paths[@]}"
+                ;;
+            7)
+                names=()
+                for f in "$(set_dir "$d")/${d}_"*; do b=${f##*/}; names+=("${b#"${d}_"}"); done
+                sel=$(menu_checklist "Ficheros a eliminar de la copia $d:" "${names[@]}") || continue
+                [ -n "$sel" ] || continue
+                mapfile -t paths <<< "$sel"
+                confirm_ui "¿Eliminar ${#paths[@]} fichero(s) de la copia $d?\n\nNo se puede deshacer." && ui_run delete_files "$d" "${paths[@]}"
+                ;;
+            8)
+                if confirm_ui "¿Eliminar la copia COMPLETA $d?\n\n$(set_summary "$d")\n\nNo se puede deshacer."; then
+                    ui_run rs_eliminar "$d"
+                    return 0
+                fi
+                ;;
+        esac
+    done
+}
+
+menu_gestionar() {
+    local sel d opts SETS=()
+    while true; do
+        mapfile -t SETS < <(list_sets)
+        if [ ${#SETS[@]} -eq 0 ]; then dialog --msgbox "No hay copias en $BACKUP_DIR" 6 60; return 0; fi
+        opts=()
+        for d in "${SETS[@]}"; do opts+=("$d" "$(set_summary "$d")"); done
+        sel=$(dialog --backtitle "$TITLE" --title "Copias almacenadas" --cancel-label "Volver" \
+              --menu "Elige una copia (las más recientes primero):" 0 0 0 "${opts[@]}" 2>&1 1>&3) || return 0
+        menu_copia "$sel"
+    done
+}
+
+menu_crear() {
+    local sel
+    SITES=()
+    EXTRA_DBS=()
+    DO_POSTGRES=0
+    sel=$(menu_checklist "Sitios a respaldar (se incluyen sus bases de datos):" "${ALL_SITES[@]}")
+    [ -n "$sel" ] && mapfile -t SITES <<< "$sel"
+    if [ ${#ALL_DBS[@]} -gt 0 ]; then
+        sel=$(menu_checklist "Bases de datos adicionales (las de los sitios elegidos ya se incluyen):" "${ALL_DBS[@]}")
+        [ -n "$sel" ] && mapfile -t EXTRA_DBS <<< "$sel"
+    fi
+    if [ "$BACKUP_POSTGRES" = 1 ] && confirm_ui "¿Respaldar también PostgreSQL del CT $DB_CT?"; then
+        DO_POSTGRES=1
+    fi
+    if [ ${#SITES[@]} -eq 0 ] && [ ${#EXTRA_DBS[@]} -eq 0 ] && [ "$DO_POSTGRES" = 0 ]; then
+        dialog --msgbox "No se seleccionó nada." 6 40
+        return 0
+    fi
+    ui_run run_backup
+}
+
+menu_principal() {
+    local act
+    while true; do
+        act=$(dialog --backtitle "$TITLE" --title "CSB" --cancel-label "Salir" --menu "¿Qué quieres hacer?" 0 0 0 \
+              1 "Crear copias (sitios, bases de datos, configuración)" \
+              2 "Gestionar copias almacenadas (ver, restaurar, eliminar)" 2>&1 1>&3) || return 0
+        case "$act" in
+            1) menu_crear ;;
+            2) menu_gestionar ;;
+        esac
+    done
+}
+
+# ************************************************************ ARGUMENTOS *****************************************************
+
+MODE="auto"
+ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)                  usage ;;
+        -m|--manual|--m|-manual)    MODE="manual" ;;
+        -g|--gestionar)             MODE="gestionar" ;;
+        --sitio|--sitios)           MODE="sitio" ;;
+        --listar|--list)            MODE="listar" ;;
+        --copias)                   MODE="copias" ;;
+        --verificar)                MODE="verificar" ;;
+        --restaurar)                MODE="restaurar" ;;
+        --eliminar)                 MODE="eliminar" ;;
+        --si|-y)                    ASSUME_YES=1 ;;
+        -*)                         echo "Opción desconocida: $1 (usa --help)" >&2; exit 1 ;;
+        *)                          ARGS+=("$1") ;;
+    esac
+    shift
+done
+
+case "$MODE" in
+    sitio)               [ ${#ARGS[@]} -ge 1 ] || { echo "Indica al menos un sitio: csb --sitio NOMBRE" >&2; exit 1; } ;;
+    verificar|eliminar)  [ ${#ARGS[@]} -eq 1 ] || { echo "Indica la FECHA de la copia (mira: csb --copias)" >&2; exit 1; }
+                         valid_date "${ARGS[0]}" || { echo "Fecha no válida: ${ARGS[0]}" >&2; exit 1; } ;;
+    restaurar)           [ ${#ARGS[@]} -ge 3 ] || { echo "Uso: csb --restaurar {sitio|archivos|bd|apache} FECHA NOMBRE" >&2; exit 1; }
+                         valid_date "${ARGS[1]}" || { echo "Fecha no válida: ${ARGS[1]}" >&2; exit 1; } ;;
+esac
+
+# ******************************************************** COMPROBACIONES *********************************************************
+
+[ "$EUID" -eq 0 ] || { echo "ERROR: ejecútalo como root." >&2; exit 1; }
+command -v pct > /dev/null || { echo "ERROR: no encuentro 'pct' (¿estás en el host Proxmox?)." >&2; exit 1; }
+case "$MODE" in
+    manual|gestionar) command -v dialog > /dev/null || { echo "ERROR: falta dialog. Instálalo con: apt install dialog" >&2; exit 1; } ;;
+esac
+
+# Modos que necesitan hablar con los contenedores
+case "$MODE" in
+    copias|verificar|eliminar) ;;
+    *)
+        for id in $WEB_CT $DB_CT $PROXY_CT; do
+            [ "$(pct status "$id" 2> /dev/null)" = "status: running" ] || die "El contenedor $id no está en marcha."
+        done
+        mapfile -t ALL_SITES < <(en_ct "$WEB_CT" find "$WWW_DIR" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%f\n' | sort)
+        [ "${#ALL_SITES[@]}" -gt 0 ] || die "No se encontraron sitios en $WWW_DIR del CT $WEB_CT."
+        mapfile -t ALL_DBS < <(en_ct "$DB_CT" mariadb -N -B -e 'SHOW DATABASES' | grep -vxE 'information_schema|performance_schema|sys')
+        ;;
+esac
+
+if [ "$MODE" = "listar" ]; then
+    for s in "${ALL_SITES[@]}"; do
+        printf '%-40s %s\n' "$s" "$(site_dbs "$s" | paste -sd, -)"
+    done
+    exit 0
+fi
+
+[ -d "$BACKUP_DIR" ] || die "No existe $BACKUP_DIR. Crea el dataset de destino o ajusta BACKUP_DIR."
+if [ "$REQUIRE_MOUNTPOINT" = 1 ] && ! mountpoint -q "$BACKUP_DIR"; then
+    die "$BACKUP_DIR no es un punto de montaje (¿dataset ZFS sin montar?). No escribo para no llenar el disco del sistema."
+fi
+
+case "$MODE" in
+    copias)
+        cmd_copias
+        exit 0
+        ;;
+    verificar)
+        show_set "${ARGS[0]}"
+        [ "$ERRORS" -eq 0 ]
+        exit $?
+        ;;
+esac
+
+exec 9> /run/csb.lock
+flock -n 9 || die "Ya hay un backup en marcha."
+
+if [ ! -f "$LOG_FILE" ]; then
+    {
+        echo "CREALIB SERVER BACKUP (CSB)"
+        echo "Registro de Backups realizados"
+        echo " "
+    } >> "$LOG_FILE"
+fi
+
+case "$MODE" in
+    auto|sitio|manual|gestionar|restaurar)
+        FREE_GB=$(df -BG --output=avail "$BACKUP_DIR" | tail -n1 | tr -dc '0-9')
+        [ "${FREE_GB:-0}" -ge "$MIN_FREE_GB" ] || die "Solo quedan ${FREE_GB:-0} GB libres en $BACKUP_DIR (mínimo $MIN_FREE_GB GB)."
+        ;;
+esac
+
+new_stamp
+log " "
+log "====================================================================================="
+log "Ejecución $MODE (destino: $(findmnt -no SOURCE -T "$BACKUP_DIR" 2> /dev/null))"
+log "====================================================================================="
+
+# ************************************************************ EJECUCIÓN ******************************************************
+
+case "$MODE" in
+    auto)
+        [ ${#ALL_DBS[@]} -gt 0 ] || fail "No pude obtener la lista de bases de datos del CT $DB_CT"
+        SITES=("${ALL_SITES[@]}")
+        EXTRA_DBS=("${ALL_DBS[@]}")
+        DO_POSTGRES=1
+        run_backup
+        finalize
+        ;;
+    sitio)
+        for s in "${ARGS[@]}"; do
+            in_array "$s" "${ALL_SITES[@]}" || die "No existe el sitio '$s' en $WWW_DIR (usa: csb --listar)"
+        done
+        [ ${#ALL_DBS[@]} -gt 0 ] || fail "No pude obtener la lista de bases de datos del CT $DB_CT"
+        SITES=("${ARGS[@]}")
+        run_backup
+        finalize
+        ;;
+    manual)
+        exec 3>&1
+        menu_principal
+        exec 3>&-
+        clear
+        ;;
+    gestionar)
+        exec 3>&1
+        menu_gestionar
+        exec 3>&-
+        clear
+        ;;
+    restaurar)
+        cmd_restaurar
+        finalize
+        ;;
+    eliminar)
+        rs_eliminar "${ARGS[0]}"
+        ;;
+esac
+
+[ "$ERRORS" -eq 0 ]

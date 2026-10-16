@@ -1,0 +1,10 @@
+# /etc/cron.d/csb - Copia diaria y rotación
+# Si el host tiene correo configurado (ver setup-mail-alerts.sh), recibirás un aviso
+# solo cuando "csb" escriba algo por stderr (errores). Si todo va bien, no llega nada.
+MAILTO=root
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Copia completa diaria a las 03:00 y rotación justo después.
+# El ";" (y no "&&") es intencionado: la rotación se ejecuta aunque la copia falle,
+# y sus salvaguardas impiden borrar si no hay una copia completa reciente.
+0 3 * * * root /usr/local/bin/csb > /dev/null ; /usr/local/bin/csb-prune --aplicar >> /var/log/csb-prune.log 2>&1
