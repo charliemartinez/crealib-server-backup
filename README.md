@@ -43,16 +43,16 @@ Ejemplo: `BACKUP_DIR=/mnt/otro/destino WEB_CT=200 csb --listar`
 ## Uso
 
 ```bash
-csb                                   # copia completa
-csb --sitio ejemplo.org               # un sitio con sus bases de datos
-csb --listar                          # sitios y la base de datos de cada uno
-csb --copias                          # lista las copias
-csb --verificar 2026-10-15_03-00-01   # comprueba integridad
-csb --restaurar sitio FECHA ejemplo.org
-csb --restaurar archivos FECHA ejemplo.org
-csb --restaurar bd FECHA nombre_bd
-csb --restaurar apache FECHA 101
-csb --manual                          # menú interactivo
+backup                                   # copia completa
+backup --sitio ejemplo.org               # un sitio con sus bases de datos
+backup --listar                          # sitios y la base de datos de cada uno
+backup --copias                          # lista las copias
+backup --verificar 2026-10-15_03-00-01   # comprueba integridad
+backup --restaurar sitio FECHA ejemplo.org
+backup --restaurar archivos FECHA ejemplo.org
+backup --restaurar bd FECHA nombre_bd
+backup --restaurar apache FECHA 101
+backup --manual                          # menú interactivo
 ```
 
 Las copias se guardan como `BACKUP_DIR/AAAA/MM/FECHA_NOMBRE.{tar.gz,sql.gz}`. Añade `--si` para no pedir confirmación en operaciones destructivas.
