@@ -7,20 +7,20 @@
 #   - Bases de datos: MariaDB (y opcionalmente PostgreSQL) del contenedor DB_CT
 #
 # Uso:
-#   csb                          Copia completa (modo automático)
-#   csb -m | --manual            Menú: crear copias o gestionar las existentes
-#   csb -g | --gestionar         Menú de gestión: ver, verificar, restaurar y eliminar copias
-#   csb --sitio NOMBRE ...       Copia de uno o más sitios, con sus bases de datos
-#   csb --listar                 Sitios y bases de datos de cada uno (también WordPress en subcarpetas)
-#   csb --copias                 Lista las copias almacenadas
-#   csb --verificar FECHA        Comprueba la integridad de una copia
-#   csb --restaurar sitio FECHA NOMBRE      Ficheros y bases de datos de un sitio
-#   csb --restaurar archivos FECHA NOMBRE   Solo los ficheros de un sitio
-#   csb --restaurar bd FECHA NOMBRE         Solo una base de datos
-#   csb --restaurar apache FECHA CT [RUTA]  Configuración de Apache de un contenedor
+#   backup                          Copia completa (modo automático)
+#   backup -m | --manual            Menú: crear copias o gestionar las existentes
+#   backup -g | --gestionar         Menú de gestión: ver, verificar, restaurar y eliminar copias
+#   backup --sitio NOMBRE ...       Copia de uno o más sitios, con sus bases de datos
+#   backup --listar                 Sitios y bases de datos de cada uno (también WordPress en subcarpetas)
+#   backup --copias                 Lista las copias almacenadas
+#   backup --verificar FECHA        Comprueba la integridad de una copia
+#   backup --restaurar sitio FECHA NOMBRE      Ficheros y bases de datos de un sitio
+#   backup --restaurar archivos FECHA NOMBRE   Solo los ficheros de un sitio
+#   backup --restaurar bd FECHA NOMBRE         Solo una base de datos
+#   backup --restaurar apache FECHA CT [RUTA]  Configuración de Apache de un contenedor
 #                                           (sin RUTA: todo; con RUTA: ficheros concretos)
-#   csb --eliminar FECHA         Elimina una copia completa
-#   csb -h | --help              Esta ayuda
+#   backup --eliminar FECHA         Elimina una copia completa
+#   backup -h | --help              Esta ayuda
 #
 # FECHA es la que muestra "csb --copias". Añade --si para no pedir confirmación.
 # Antes de restaurar, el script guarda el estado actual como una copia nueva.
