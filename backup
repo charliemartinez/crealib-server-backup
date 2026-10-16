@@ -22,15 +22,15 @@
 #   backup --eliminar FECHA         Elimina una copia completa
 #   backup -h | --help              Esta ayuda
 #
-# FECHA es la que muestra "csb --copias". Añade --si para no pedir confirmación.
+# FECHA es la que muestra "backup --copias". Añade --si para no pedir confirmación.
 # Antes de restaurar, el script guarda el estado actual como una copia nueva.
-# Este script NO borra copias antiguas por su cuenta: para eso existe csb-prune.
+# Este script NO borra copias antiguas por su cuenta: para eso existe backup-prune.
 
 set -o pipefail
 umask 077
 
 # ********************************************************** CONFIGURACIÓN ********************************************************
-# Cualquier valor puede sobrescribirse desde el entorno, por ejemplo: BACKUP_DIR=/otra/ruta csb
+# Cualquier valor puede sobrescribirse desde el entorno, por ejemplo: BACKUP_DIR=/otra/ruta backup
 
 WEB_CT="${WEB_CT:-101}"                                   # Contenedor con los sitios web
 DB_CT="${DB_CT:-103}"                                     # Contenedor con las bases de datos
@@ -535,7 +535,7 @@ rs_apache() {
 cmd_restaurar() {
     local tipo=${ARGS[0]:-} d=${ARGS[1]:-} n=${ARGS[2]:-}
     if [ -z "$d" ] || [ -z "$n" ]; then
-        echo "Uso: csb --restaurar {sitio|archivos|bd|apache} FECHA NOMBRE   (las fechas salen de: csb --copias)" >&2
+        echo "Uso: backup --restaurar {sitio|archivos|bd|apache} FECHA NOMBRE   (las fechas salen de: backup --copias)" >&2
         exit 1
     fi
     case "$tipo" in
@@ -718,10 +718,10 @@ while [ $# -gt 0 ]; do
 done
 
 case "$MODE" in
-    sitio)               [ ${#ARGS[@]} -ge 1 ] || { echo "Indica al menos un sitio: csb --sitio NOMBRE" >&2; exit 1; } ;;
-    verificar|eliminar)  [ ${#ARGS[@]} -eq 1 ] || { echo "Indica la FECHA de la copia (mira: csb --copias)" >&2; exit 1; }
+    sitio)               [ ${#ARGS[@]} -ge 1 ] || { echo "Indica al menos un sitio: backup --sitio NOMBRE" >&2; exit 1; } ;;
+    verificar|eliminar)  [ ${#ARGS[@]} -eq 1 ] || { echo "Indica la FECHA de la copia (mira: backup --copias)" >&2; exit 1; }
                          valid_date "${ARGS[0]}" || { echo "Fecha no válida: ${ARGS[0]}" >&2; exit 1; } ;;
-    restaurar)           [ ${#ARGS[@]} -ge 3 ] || { echo "Uso: csb --restaurar {sitio|archivos|bd|apache} FECHA NOMBRE" >&2; exit 1; }
+    restaurar)           [ ${#ARGS[@]} -ge 3 ] || { echo "Uso: backup --restaurar {sitio|archivos|bd|apache} FECHA NOMBRE" >&2; exit 1; }
                          valid_date "${ARGS[1]}" || { echo "Fecha no válida: ${ARGS[1]}" >&2; exit 1; } ;;
 esac
 
@@ -807,7 +807,7 @@ case "$MODE" in
         ;;
     sitio)
         for s in "${ARGS[@]}"; do
-            in_array "$s" "${ALL_SITES[@]}" || die "No existe el sitio '$s' en $WWW_DIR (usa: csb --listar)"
+            in_array "$s" "${ALL_SITES[@]}" || die "No existe el sitio '$s' en $WWW_DIR (usa: backup --listar)"
         done
         [ ${#ALL_DBS[@]} -gt 0 ] || fail "No pude obtener la lista de bases de datos del CT $DB_CT"
         SITES=("${ARGS[@]}")

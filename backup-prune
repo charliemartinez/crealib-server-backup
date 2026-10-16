@@ -1,11 +1,11 @@
 #!/bin/bash
-# csb-prune - Rotación de copias para CSB (CREALIB SERVER BACKUP)
+# backup-prune - Rotación de copias para CSB (CREALIB SERVER BACKUP)
 # Licencia GPLv2. Sin argumentos: solo simula. Con --aplicar: borra.
 #
 # Política por defecto:
 #   - Conserva TODAS las copias de los últimos KEEP_DAYS días.
 #   - Además conserva la copia más completa (más ficheros) de cada uno de los últimos KEEP_MONTHS meses.
-#   - Borra el resto, usando "csb --eliminar" (pasa por las validaciones de csb).
+#   - Borra el resto, usando "backup --eliminar" (pasa por las validaciones de backup).
 #
 # Salvaguardas (si no se cumplen, no borra nada):
 #   1. Debe existir una copia completa (>= MIN_FILES_FULL ficheros) de los últimos 2 días.
@@ -13,7 +13,7 @@
 
 export LC_ALL=C
 BACKUP_DIR="${BACKUP_DIR:-/mnt/pool-bulk/backups-sitios}"
-CSB_BIN="${CSB_BIN:-/usr/local/bin/csb}"
+CSB_BIN="${CSB_BIN:-/usr/local/bin/backup}"
 KEEP_DAYS="${KEEP_DAYS:-14}"
 KEEP_MONTHS="${KEEP_MONTHS:-12}"
 MIN_SETS="${MIN_SETS:-3}"

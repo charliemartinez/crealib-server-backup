@@ -1,14 +1,14 @@
 #!/bin/bash
 # Instala CSB en el host Proxmox. Licencia GPLv2.
-#   ./install.sh          copia csb y csb-prune a /usr/local/bin
+#   ./install.sh          copia backup y backup-prune a /usr/local/bin
 #   ./install.sh --cron   además instala /etc/cron.d/csb (diario 03:00)
 set -euo pipefail
 [ "$EUID" -eq 0 ] || { echo "Ejecútalo como root." >&2; exit 1; }
 command -v pct > /dev/null || { echo "No encuentro 'pct': esto debe ejecutarse en el host Proxmox." >&2; exit 1; }
 cd "$(dirname "$0")"
-install -m 755 csb /usr/local/bin/csb
-install -m 755 csb-prune /usr/local/bin/csb-prune
-echo "Instalados: /usr/local/bin/csb y /usr/local/bin/csb-prune"
+install -m 755 backup /usr/local/bin/backup
+install -m 755 backup-prune /usr/local/bin/backup-prune
+echo "Instalados: /usr/local/bin/backup y /usr/local/bin/backup-prune"
 command -v dialog > /dev/null || echo "Aviso: falta 'dialog' (solo necesario para los menús): apt install dialog"
 if [ "${1:-}" = "--cron" ]; then
     if [ -e /etc/cron.d/csb ]; then

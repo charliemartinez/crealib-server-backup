@@ -7,8 +7,8 @@ Copias de seguridad de sitios web (WordPress y otros) y bases de datos que viven
 - **Apache**: copia de `sites-available/enabled` y `conf-available/enabled` del contenedor web y del proxy.
 - **Integridad**: cada copia lleva sumas SHA-256 y se verifica al crearla (gzip, tar y última línea del volcado).
 - **Restauración** de sitio completo, solo ficheros, solo base de datos o configuración de Apache. Antes de restaurar guarda el estado actual como una copia nueva; si Apache no valida la configuración restaurada, deshace el cambio.
-- **Menús** con `dialog` (`csb --manual`, `csb --gestionar`).
-- **Rotación** con `csb-prune`, con salvaguardas para no borrar nunca por error.
+- **Menús** con `dialog` (`backup --manual`, `backup --gestionar`).
+- **Rotación** con `backup-prune`, con salvaguardas para no borrar nunca por error.
 
 ## Requisitos
 
@@ -25,7 +25,7 @@ cd crealib-server-backup
 ./install.sh
 ```
 
-Ajusta la configuración con variables de entorno (o editando la sección *CONFIGURACIÓN* de `csb`):
+Ajusta la configuración con variables de entorno (o editando la sección *CONFIGURACIÓN* de `backup`):
 
 | Variable | Por defecto | Descripción |
 |---|---|---|
@@ -38,7 +38,7 @@ Ajusta la configuración con variables de entorno (o editando la sección *CONFI
 | `MIN_FREE_GB` | `20` | No crea copias si queda menos espacio libre |
 | `BACKUP_POSTGRES` | `1` | Incluye PostgreSQL |
 
-Ejemplo: `BACKUP_DIR=/mnt/otro/destino WEB_CT=200 csb --listar`
+Ejemplo: `BACKUP_DIR=/mnt/otro/destino WEB_CT=200 backup --listar`
 
 ## Uso
 
@@ -61,7 +61,7 @@ Las copias se guardan como `BACKUP_DIR/AAAA/MM/FECHA_NOMBRE.{tar.gz,sql.gz}`. A�
 
 ## ¿Diaria, semanal o mensual?
 
-`csb` hace una copia **completa** cada vez, sin deduplicar, y los `.gz` no se comprimen más con ZFS. El espacio necesario es *tamaño de una copia × copias al mes × meses a conservar*. Ejemplo con copias de 1,7 GB:
+`backup` hace una copia **completa** cada vez, sin deduplicar, y los `.gz` no se comprimen más con ZFS. El espacio necesario es *tamaño de una copia × copias al mes × meses a conservar*. Ejemplo con copias de 1,7 GB:
 
 | Frecuencia, sin borrar nunca | Consumo al año |
 |---|---|
@@ -69,13 +69,13 @@ Las copias se guardan como `BACKUP_DIR/AAAA/MM/FECHA_NOMBRE.{tar.gz,sql.gz}`. A�
 | Semanal | ~88 GB |
 | Mensual | ~20 GB |
 
-Por eso la combinación recomendada es **diaria + rotación** con `csb-prune`: 14 días completos + la mejor copia de cada uno de los últimos 12 meses (unas 26 copias, ~44 GB con ese tamaño). Mide el tamaño de **tu** copia (`csb --copias`) y ajusta `KEEP_DAYS` y `KEEP_MONTHS`.
+Por eso la combinación recomendada es **diaria + rotación** con `backup-prune`: 14 días completos + la mejor copia de cada uno de los últimos 12 meses (unas 26 copias, ~44 GB con ese tamaño). Mide el tamaño de **tu** copia (`backup --copias`) y ajusta `KEEP_DAYS` y `KEEP_MONTHS`.
 
-## Rotación (`csb-prune`)
+## Rotación (`backup-prune`)
 
 ```bash
-csb-prune             # simulación: muestra qué borraría
-csb-prune --aplicar   # borra
+backup-prune             # simulación: muestra qué borraría
+backup-prune --aplicar   # borra
 ```
 
 Variables: `KEEP_DAYS` (14), `KEEP_MONTHS` (12), `MIN_SETS` (3), `MIN_FILES_FULL` (20), `BACKUP_DIR`, `CSB_BIN`.
@@ -84,7 +84,7 @@ Salvaguardas: si no hay una copia completa (≥ `MIN_FILES_FULL` ficheros) de lo
 
 ## Programar con cron
 
-Prueba primero una copia a mano (`csb`) y comprueba que termina con `errores: 0`. Después:
+Prueba primero una copia a mano (`backup`) y comprueba que termina con `errores: 0`. Después:
 
 ```bash
 ./install.sh --cron
@@ -96,13 +96,13 @@ Comprobación al día siguiente:
 
 ```bash
 grep 'CSB (auto)' /mnt/TU_DESTINO/backup_log.txt | tail -3
-cat /var/log/csb-prune.log
-csb --copias
+cat /var/log/backup-prune.log
+backup --copias
 ```
 
 ## Alertas por correo
 
-Con `MAILTO=root`, cron envía un correo cuando `csb` escribe algo por stderr; si todo va bien, no llega nada. Para que ese correo llegue a una dirección real:
+Con `MAILTO=root`, cron envía un correo cuando `backup` escribe algo por stderr; si todo va bien, no llega nada. Para que ese correo llegue a una dirección real:
 
 ```bash
 SMTP_HOST=smtp.example.com SMTP_USER=alertas@example.com ALERT_TO=admin@example.org ./setup-mail-alerts.sh
